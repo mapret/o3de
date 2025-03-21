@@ -288,6 +288,7 @@ namespace GraphCanvas
 
         static QRectF AlignNodes(const AZStd::vector< AZ::EntityId >& memberIds, const AlignConfig& alignConfig, QRectF overallBoundingRect = QRectF());
         static void OrganizeNodes(const AZStd::vector< AZ::EntityId >& memberIds, const AlignConfig& alignConfig);
+        static void OrganizeNodesTreeLayout(const AZStd::vector<AZ::EntityId>& nodeIdsToOrganize);
 
         static void FocusOnElements(const AZStd::vector< AZ::EntityId >& memberIds, const FocusConfig& focusConfig);
 

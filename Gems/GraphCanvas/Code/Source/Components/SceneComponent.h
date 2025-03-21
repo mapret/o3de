@@ -501,6 +501,8 @@ namespace GraphCanvas
 
         QPointF SignalGenericAddPositionUseBegin() override;
         void SignalGenericAddPositionUseEnd() override;
+
+        void ApplyTreeLayout() override;
         ////
 
         bool AllowContextMenu() const;

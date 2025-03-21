@@ -2781,6 +2781,107 @@ namespace GraphCanvas
         GraphModelRequestBus::Event(graphId, &GraphModelRequests::RequestUndoPoint);
     }
 
+    void GraphUtils::OrganizeNodesTreeLayout(const AZStd::vector<AZ::EntityId>& nodeIdsToOrganize)
+    {
+        if (nodeIdsToOrganize.empty())
+        {
+            return;
+        }
+
+        AZStd::vector<AZ::EntityId> connectionIds;
+        AZ::Vector2 gridStep = AZ::Vector2::CreateZero();
+        {
+            GraphId graphId;
+            EBUS_EVENT_ID_RESULT(graphId, nodeIdsToOrganize.front(), SceneMemberRequestBus, GetScene);
+            EBUS_EVENT_ID_RESULT(connectionIds, graphId, SceneRequestBus, GetConnections);
+
+            AZ::EntityId gridId;
+            EBUS_EVENT_ID_RESULT(gridId, graphId, SceneRequestBus, GetGrid);
+            EBUS_EVENT_ID_RESULT(gridStep, gridId, GridRequestBus, GetMinorPitch);
+        }
+
+        AZStd::unordered_map<AZ::EntityId, AZStd::unordered_set<AZ::EntityId>> childNodes;
+        AZStd::unordered_set<AZ::EntityId> rootNodes;
+        rootNodes.insert_range(nodeIdsToOrganize);
+
+        // Create parent-child relations from connections
+        for (const AZ::EntityId& connectionEntity : connectionIds)
+        {
+            NodeId sourceNode, targetNode;
+            EBUS_EVENT_ID_RESULT(sourceNode, connectionEntity, ConnectionRequestBus, GetSourceNodeId);
+            EBUS_EVENT_ID_RESULT(targetNode, connectionEntity, ConnectionRequestBus, GetTargetNodeId);
+            // TODO(treelayout): Check if sourceNode and targetNode are in nodeIdsToOrganize
+            childNodes[sourceNode].insert(targetNode);
+            rootNodes.erase(targetNode);
+        }
+
+        if (rootNodes.empty())
+        {
+            AZ_Warning("GraphCanvas", false, "Could not apply tree layout since there are no root nodes.");
+            return;
+        }
+
+        // Create a mapping from distance from the root node (ie. depth) to node id by doing breadth-first search (BFS), starting from nodes
+        // without incoming connections (ie. root nodes), then use this mapping to collect the per-depth node ids.
+        AZStd::map<int, AZStd::vector<AZ::EntityId>> perDepthNodeIds; // Use map for automatic sorting by depth
+        {
+            AZStd::queue<AZStd::pair<AZ::EntityId, int>> visitQueue;
+            for (const AZ::EntityId& rootEntityId : rootNodes)
+            {
+                visitQueue.emplace(rootEntityId, 0);
+            }
+
+            AZStd::unordered_map<AZ::EntityId, int> nodeDepths;
+            // TODO(treelayout): What if there are loops in the graph?
+            while (!visitQueue.empty())
+            {
+                const auto [nodeId, depth]{ visitQueue.front() };
+                visitQueue.pop();
+
+                // Each node could be visited multiple times, but due to BFS the largest depth remains
+                nodeDepths[nodeId] = depth;
+
+                if (auto childNodeIterator = childNodes.find(nodeId); childNodeIterator != childNodes.end())
+                {
+                    for (const AZ::EntityId& childNode : childNodeIterator->second)
+                    {
+                        visitQueue.emplace(childNode, depth + 1);
+                    }
+                }
+            }
+
+            for (const auto& [nodeId, treeDepth] : nodeDepths)
+            {
+                perDepthNodeIds[treeDepth].push_back(nodeId);
+            }
+        }
+
+        float nodePositionX = 0;
+        for (const auto& [treeDepth, nodeIds] : perDepthNodeIds)
+        {
+            float nodePositionY = 0;
+            float columnWidth = 0;
+            for (const AZ::EntityId& nodeId : nodeIds)
+            {
+                EBUS_EVENT_ID(nodeId, GeometryRequestBus, SetPosition, AZ::Vector2(nodePositionX, nodePositionY));
+
+                QGraphicsItem* graphicsItem{ nullptr };
+                EBUS_EVENT_ID_RESULT(graphicsItem, nodeId, SceneMemberUIRequestBus, GetRootGraphicsItem);
+                if (graphicsItem)
+                {
+                    columnWidth = AZStd::max(columnWidth, static_cast<float>(graphicsItem->sceneBoundingRect().width()));
+                    // TODO(treelayout): Why is columnWidth sometimes too small (nodes of neighbouring columns overlap)?
+                    nodePositionY += graphicsItem->sceneBoundingRect().height() + gridStep.GetY();
+                }
+                else
+                {
+                    AZ_Assert(false, "QGraphicsItem not found");
+                }
+            }
+            nodePositionX += columnWidth + gridStep.GetX();
+        }
+    }
+
     void GraphUtils::FocusOnElements(const AZStd::vector< AZ::EntityId >& memberIds, const FocusConfig& focusConfig)
     {
         if (memberIds.empty())

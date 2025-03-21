@@ -385,6 +385,9 @@ namespace GraphCanvas
         // Signals used to manage the state around the generic add position
         virtual QPointF SignalGenericAddPositionUseBegin() = 0;
         virtual void SignalGenericAddPositionUseEnd() = 0;
+
+        //! Arranges all graph nodes in a tree layout with the root nodes on the left side
+        virtual void ApplyTreeLayout() = 0;
     };
 
     using SceneRequestBus = AZ::EBus<SceneRequests>;

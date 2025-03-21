@@ -3503,6 +3503,11 @@ namespace GraphCanvas
         m_allowReset = true;
     }
 
+    void SceneComponent::ApplyTreeLayout()
+    {
+        GraphUtils::OrganizeNodesTreeLayout(GetNodes());
+    }
+
     bool SceneComponent::AllowContextMenu() const
     {
         return !IsDragSelecting() && !IsDraggingConnection();
