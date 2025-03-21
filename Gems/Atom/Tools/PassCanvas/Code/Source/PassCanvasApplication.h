@@ -54,10 +54,17 @@ namespace PassCanvas
         void InitMainWindow();
         void InitDefaultDocument();
 
+        void LoadPassTemplates();
+        void BuildPassTree();
+        bool BuildPassTreeRecursive(const AZStd::string& passPath, const AZ::Name& passTemplateName, AZ::Vector2& nodePosition);
+
         AZStd::unique_ptr<PassCanvasMainWindow> m_window;
         AZStd::unique_ptr<AtomToolsFramework::EntityPreviewViewportSettingsSystem> m_viewportSettingsSystem;
         AZStd::unique_ptr<AtomToolsFramework::DynamicNodeManager> m_dynamicNodeManager;
         AZStd::shared_ptr<GraphModel::GraphContext> m_graphContext;
         AtomToolsFramework::GraphViewSettingsPtr m_graphViewSettingsPtr;
+
+        AZStd::unordered_map<AZ::Name, AZ::RPI::PassTemplate> m_passTemplates;
+        AZStd::unordered_map<AZStd::string, GraphModel::NodePtr> m_graphNodes;
     };
 } // namespace PassCanvas

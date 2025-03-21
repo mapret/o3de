@@ -6,7 +6,9 @@
  *
  */
 
+#include <Atom/RPI.Edit/Common/JsonUtils.h>
 #include <Atom/RPI.Reflect/Image/StreamingImageAsset.h>
+#include <Atom/RPI.Reflect/Pass/PassAsset.h>
 #include <AtomToolsFramework/Document/AtomToolsAnyDocument.h>
 #include <AtomToolsFramework/Document/AtomToolsDocumentSystemRequestBus.h>
 #include <AtomToolsFramework/Graph/DynamicNode/DynamicNodeUtil.h>
@@ -45,6 +47,8 @@ namespace PassCanvas
 #endif
         return LY_CMAKE_TARGET;
     }
+
+    const char* OutputSlotSuffix = "_output";
 
     PassCanvasApplication::PassCanvasApplication(int* argc, char*** argv)
         : Base(GetBuildTargetName(), argc, argv)
@@ -102,6 +106,7 @@ namespace PassCanvas
         InitPassGraphDocumentType();
         InitMainWindow();
         InitDefaultDocument();
+        BuildPassTree();
     }
 
     void PassCanvasApplication::Destroy()
@@ -152,6 +157,8 @@ namespace PassCanvas
 
         // Search the project and gems for dynamic node configurations and register them with the manager
         m_dynamicNodeManager->LoadConfigFiles("passgraphnode");
+
+        LoadPassTemplates();
     }
 
     void PassCanvasApplication::InitDynamicNodeEditData()
@@ -177,6 +184,8 @@ namespace PassCanvas
         m_graphViewSettingsPtr->m_styleManagerPath = "PassCanvas/StyleSheet/passcanvas_style.json";
         m_graphViewSettingsPtr->m_nodeMimeType = "PassCanvas/node-palette-mime-event";
         m_graphViewSettingsPtr->m_nodeSaveIdentifier = "PassCanvas/ContextMenu";
+        m_graphViewSettingsPtr->m_connectionCurveType = GraphCanvas::Styling::ConnectionCurveType::Curved;
+        m_graphViewSettingsPtr->m_dataConnectionCurveType = GraphCanvas::Styling::ConnectionCurveType::Curved;
         m_graphViewSettingsPtr->m_createNodeTreeItemsFn = [](const AZ::Crc32& toolId)
         {
             GraphCanvas::GraphCanvasTreeItem* rootTreeItem = {};
@@ -242,5 +251,118 @@ namespace PassCanvas
             AtomToolsFramework::AtomToolsDocumentNotificationBus::Event(
                 m_toolId, &AtomToolsFramework::AtomToolsDocumentNotificationBus::Handler::OnDocumentOpened, documentId);
         }
+    }
+
+    void PassCanvasApplication::LoadPassTemplates()
+    {
+        // TODO(passcanvas): Load passes templates which are not defined in .pass files (eg. CopyPass)
+        for (const AZStd::string& passFile : AtomToolsFramework::GetPathsInSourceFoldersMatchingExtension("pass"))
+        {
+            AZ::RPI::PassAsset passAsset;
+            if (auto result = AZ::JsonSerializationUtils::LoadObjectFromFile(passAsset, passFile); !result.IsSuccess())
+            {
+                AZ_Error(
+                    "PassCanvasApplication", false, "Failed to load PassAsset \"%s\" (%s)", passFile.c_str(), result.GetError().c_str());
+                continue;
+            }
+
+            if (!passAsset.GetPassTemplate())
+            {
+                continue;
+            }
+
+            const AZ::RPI::PassTemplate& passTemplate = *(passAsset.GetPassTemplate());
+            m_passTemplates[passTemplate.m_name] = passTemplate;
+
+            AtomToolsFramework::DynamicNodeConfig config;
+            config.m_title = passTemplate.m_name.GetStringView();
+            config.m_category = "Pass templates";
+            for (const AZ::RPI::PassSlot& slot : passTemplate.m_slots)
+            {
+                if (slot.m_slotType == AZ::RPI::PassSlotType::Input || slot.m_slotType == AZ::RPI::PassSlotType::InputOutput)
+                {
+                    AtomToolsFramework::DynamicNodeSlotConfig slotConfig;
+                    slotConfig.m_name = slot.m_name.GetStringView();
+                    slotConfig.m_displayName = slot.m_name.GetStringView();
+                    slotConfig.m_supportedDataTypeRegex = "string";
+                    config.m_inputSlots.push_back(slotConfig);
+                }
+                if (slot.m_slotType == AZ::RPI::PassSlotType::Output || slot.m_slotType == AZ::RPI::PassSlotType::InputOutput)
+                {
+                    AtomToolsFramework::DynamicNodeSlotConfig slotConfig;
+                    // Need to add a suffix since m_name must be unique within the node
+                    slotConfig.m_name = AZStd::string(slot.m_name.GetStringView()) + OutputSlotSuffix;
+                    slotConfig.m_displayName = slot.m_name.GetStringView();
+                    slotConfig.m_supportedDataTypeRegex = "string";
+                    config.m_outputSlots.push_back(slotConfig);
+                }
+            }
+            config.AutoFillMissingData();
+            m_dynamicNodeManager->RegisterConfig(config);
+        }
+    }
+
+    void PassCanvasApplication::BuildPassTree()
+    {
+        AZ::Vector2 initialNodePosition = AZ::Vector2::CreateZero();
+        // TODO(passcanvas): Select the root node in the AssetBrowser or somewhere in the gui
+        BuildPassTreeRecursive("Root", AZ::Name("MainPipeline"), initialNodePosition);
+
+        EBUS_EVENT(GraphCanvas::SceneRequestBus, ClearSelection);
+        EBUS_EVENT(GraphCanvas::SceneRequestBus, ApplyTreeLayout);
+        EBUS_EVENT(GraphCanvas::ViewRequestBus, ShowEntireGraph);
+    }
+
+    bool PassCanvasApplication::BuildPassTreeRecursive(
+        const AZStd::string& passPath, const AZ::Name& passTemplateName, AZ::Vector2& nodePosition)
+    {
+        GraphModel::GraphPtr graphPtr;
+        EBUS_EVENT_RESULT(graphPtr, AtomToolsFramework::GraphDocumentRequestBus, GetGraph);
+
+        auto passNode = m_dynamicNodeManager->CreateNodeByName(graphPtr, passTemplateName.GetStringView());
+        if (!passNode)
+        {
+            AZ_Warning("PassCanvasApplication", false, "Failed to create graph node of type \"%s\"", passTemplateName.GetCStr());
+            return false;
+        }
+        AZ_Assert(!m_graphNodes.contains(passPath), "Pass path already exists");
+
+        m_graphNodes.emplace(passPath, passNode);
+        EBUS_EVENT(GraphModelIntegration::GraphControllerRequestBus, AddNode, passNode, nodePosition);
+
+        for (const AZ::RPI::PassRequest& passRequest : m_passTemplates[passTemplateName].m_passRequests)
+        {
+            AZStd::string childPassPath = passPath + "." + passRequest.m_passName.GetCStr();
+            if (!BuildPassTreeRecursive(childPassPath, passRequest.m_templateName, nodePosition))
+            {
+                continue;
+            }
+
+            for (const AZ::RPI::PassConnection& connection : passRequest.m_connections)
+            {
+                const AZ::Name& localSlotName = connection.m_localSlot;
+                const AZ::Name& remoteSlotName = connection.m_attachmentRef.m_attachment;
+                AZStd::string remoteNodeName = connection.m_attachmentRef.m_pass.GetStringView();
+
+                // TODO(passcanvas): Handle these special values
+                if (remoteNodeName == "PipelineGlobal" || remoteNodeName == "Parent" || remoteNodeName == "This")
+                {
+                    continue;
+                }
+
+                AZStd::string remoteNodePath = passPath + "." + remoteNodeName;
+                EBUS_EVENT(
+                    GraphModelIntegration::GraphControllerRequestBus,
+                    AddConnectionBySlotId,
+                    m_graphNodes[remoteNodePath],
+                    GraphModel::SlotId(AZStd::string(remoteSlotName.GetStringView()) + OutputSlotSuffix),
+                    m_graphNodes[childPassPath],
+                    GraphModel::SlotId(localSlotName.GetStringView()));
+            }
+        }
+
+        // TODO(passcanvas): Add connections from PassTemplate::m_connections
+
+        return true;
     }
 } // namespace PassCanvas
