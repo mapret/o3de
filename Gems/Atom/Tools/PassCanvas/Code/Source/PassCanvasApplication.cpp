@@ -345,12 +345,17 @@ namespace PassCanvas
                 AZStd::string remoteNodeName = connection.m_attachmentRef.m_pass.GetStringView();
 
                 // TODO(passcanvas): Handle these special values
-                if (remoteNodeName == "PipelineGlobal" || remoteNodeName == "Parent" || remoteNodeName == "This")
+                if (remoteNodeName == "PipelineGlobal" || remoteNodeName == "This")
                 {
                     continue;
                 }
 
-                AZStd::string remoteNodePath = passPath + "." + remoteNodeName;
+                AZStd::string remoteNodePath = passPath;
+                if (remoteNodeName != "Parent")
+                {
+                    remoteNodePath += "." + remoteNodeName;
+                }
+
                 EBUS_EVENT(
                     GraphModelIntegration::GraphControllerRequestBus,
                     AddConnectionBySlotId,
