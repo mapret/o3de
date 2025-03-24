@@ -48,7 +48,19 @@ namespace PassCanvas
         return LY_CMAKE_TARGET;
     }
 
+    const char* InputSlotSuffix = "_input";
     const char* OutputSlotSuffix = "_output";
+    const char* VirtualSlotSuffix = " (virtual)";
+
+    AZStd::string MakeInputSlotName(const AZ::Name& slotBaseName)
+    {
+        return AZStd::string(slotBaseName.GetStringView()) + InputSlotSuffix;
+    }
+
+    AZStd::string MakeOutputSlotName(const AZ::Name& slotBaseName)
+    {
+        return AZStd::string(slotBaseName.GetStringView()) + OutputSlotSuffix;
+    }
 
     PassCanvasApplication::PassCanvasApplication(int* argc, char*** argv)
         : Base(GetBuildTargetName(), argc, argv)
@@ -273,27 +285,42 @@ namespace PassCanvas
 
             const AZ::RPI::PassTemplate& passTemplate = *(passAsset.GetPassTemplate());
             m_passTemplates[passTemplate.m_name] = passTemplate;
+            bool isParentPass = !passTemplate.m_passRequests.empty();
 
             AtomToolsFramework::DynamicNodeConfig config;
             config.m_title = passTemplate.m_name.GetStringView();
             config.m_category = "Pass templates";
             for (const AZ::RPI::PassSlot& slot : passTemplate.m_slots)
             {
-                if (slot.m_slotType == AZ::RPI::PassSlotType::Input || slot.m_slotType == AZ::RPI::PassSlotType::InputOutput)
-                {
-                    AtomToolsFramework::DynamicNodeSlotConfig slotConfig;
-                    slotConfig.m_name = slot.m_name.GetStringView();
-                    slotConfig.m_displayName = slot.m_name.GetStringView();
-                    slotConfig.m_supportedDataTypeRegex = "string";
-                    config.m_inputSlots.push_back(slotConfig);
-                }
-                if (slot.m_slotType == AZ::RPI::PassSlotType::Output || slot.m_slotType == AZ::RPI::PassSlotType::InputOutput)
+                // There are some cases for which additional slots (other than the ones directly corresponding to slot.m_slotType) are
+                // required:
+                // - Parent output slot connects to child output slot: The child node must have an additional input slot
+                // - Parent input slot connects to child input slot: The parent node must have an additional output slot
+                // TODO(passcanvas): Improve this by using extendable slots, deleting/hiding unused slots, or implementing group nodes which
+                //  provide group inputs as output slots to nodes within the group
                 {
                     AtomToolsFramework::DynamicNodeSlotConfig slotConfig;
                     // Need to add a suffix since m_name must be unique within the node
-                    slotConfig.m_name = AZStd::string(slot.m_name.GetStringView()) + OutputSlotSuffix;
+                    slotConfig.m_name = MakeInputSlotName(slot.m_name);
                     slotConfig.m_displayName = slot.m_name.GetStringView();
                     slotConfig.m_supportedDataTypeRegex = "string";
+                    if (slot.m_slotType == AZ::RPI::PassSlotType::Output)
+                    {
+                        slotConfig.m_displayName += VirtualSlotSuffix;
+                    }
+                    config.m_inputSlots.push_back(slotConfig);
+                }
+                if (isParentPass || slot.m_slotType != AZ::RPI::PassSlotType::Input)
+                {
+                    AtomToolsFramework::DynamicNodeSlotConfig slotConfig;
+                    // Need to add a suffix since m_name must be unique within the node
+                    slotConfig.m_name = MakeOutputSlotName(slot.m_name);
+                    slotConfig.m_displayName = slot.m_name.GetStringView();
+                    slotConfig.m_supportedDataTypeRegex = "string";
+                    if (slot.m_slotType == AZ::RPI::PassSlotType::Input)
+                    {
+                        slotConfig.m_displayName += VirtualSlotSuffix;
+                    }
                     config.m_outputSlots.push_back(slotConfig);
                 }
             }
@@ -330,7 +357,44 @@ namespace PassCanvas
         m_graphNodes.emplace(passPath, passNode);
         EBUS_EVENT(GraphModelIntegration::GraphControllerRequestBus, AddNode, passNode, nodePosition);
 
-        for (const AZ::RPI::PassRequest& passRequest : m_passTemplates[passTemplateName].m_passRequests)
+        const AZ::RPI::PassTemplate& passTemplate = m_passTemplates[passTemplateName];
+
+        auto TryAddConnection = [&](const AZStd::string& sourceNodePath,
+                                    const AZ::Name& sourceSlotName,
+                                    const AZStd::string& targetNodePath,
+                                    const AZ::Name& targetSlotName)
+        {
+            GraphModel::SlotPtr sourceSlot = m_graphNodes[sourceNodePath]->GetSlot(MakeOutputSlotName(sourceSlotName));
+            GraphModel::SlotPtr targetSlot = m_graphNodes[targetNodePath]->GetSlot(MakeInputSlotName(targetSlotName));
+            AZ_Error(
+                "PassCanvasApplication",
+                sourceSlot,
+                "Failed to add connection: Source slot \"%s::%s\" not found",
+                sourceNodePath.c_str(),
+                sourceSlotName.GetCStr());
+            AZ_Error(
+                "PassCanvasApplication",
+                targetSlot,
+                "Failed to add connection: Target slot \"%s::%s\" not found",
+                targetNodePath.c_str(),
+                targetSlotName.GetCStr());
+
+            if (sourceSlot && targetSlot)
+            {
+                GraphModel::ConnectionPtr connectionPtr;
+                EBUS_EVENT_RESULT(connectionPtr, GraphModelIntegration::GraphControllerRequestBus, AddConnection, sourceSlot, targetSlot);
+                AZ_Error(
+                    "PassCanvasApplication",
+                    connectionPtr,
+                    "Failed to add connection from \"%s::%s\" to \"%s::%s\"",
+                    sourceNodePath.c_str(),
+                    sourceSlotName.GetCStr(),
+                    targetNodePath.c_str(),
+                    targetSlotName.GetCStr());
+            }
+        };
+
+        for (const AZ::RPI::PassRequest& passRequest : passTemplate.m_passRequests)
         {
             AZStd::string childPassPath = passPath + "." + passRequest.m_passName.GetCStr();
             if (!BuildPassTreeRecursive(childPassPath, passRequest.m_templateName, nodePosition))
@@ -356,16 +420,30 @@ namespace PassCanvas
                     remoteNodePath += "." + remoteNodeName;
                 }
 
-                EBUS_EVENT(
-                    GraphModelIntegration::GraphControllerRequestBus,
-                    AddConnectionBySlotId,
-                    m_graphNodes[remoteNodePath],
-                    GraphModel::SlotId(AZStd::string(remoteSlotName.GetStringView()) + OutputSlotSuffix),
-                    m_graphNodes[childPassPath],
-                    GraphModel::SlotId(localSlotName.GetStringView()));
+                TryAddConnection(remoteNodePath, remoteSlotName, childPassPath, localSlotName);
             }
         }
 
+        for (const AZ::RPI::PassConnection& connection : passTemplate.m_connections)
+        {
+            const AZ::Name& localSlotName = connection.m_localSlot;
+            const AZ::Name& remoteSlotName = connection.m_attachmentRef.m_attachment;
+            AZStd::string remoteNodeName = connection.m_attachmentRef.m_pass.GetStringView();
+
+            // TODO(passcanvas): Handle these special values
+            if (remoteNodeName == "PipelineGlobal" || remoteNodeName == "This")
+            {
+                continue;
+            }
+
+            AZStd::string remoteNodePath = passPath;
+            if (remoteNodeName != "Parent")
+            {
+                remoteNodePath += "." + remoteNodeName;
+            }
+
+            TryAddConnection(passPath, localSlotName, remoteNodePath, remoteSlotName);
+        }
         // TODO(passcanvas): Add connections from PassTemplate::m_connections
 
         return true;
